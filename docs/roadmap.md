@@ -3,15 +3,15 @@
 The platform is built in small phases. Every phase ends in something that runs with one command
 and is covered by the CI integration workflow (`.github/workflows/integration.yml`).
 
-| Phase | Goal | Release |
+| Phase | Goal | Status |
 | --- | --- | --- |
-| 0 | Foundations: pinned images, healthchecks, Compose profiles, Makefile, CI, ADRs | v0.0.1 |
-| 1 | Flight events published to Kafka, with a versioned schema and fault injection | v0.1.0 |
-| 2 | Lakehouse storage: S3-compatible store, Iceberg REST catalog, Spark cluster | v0.2.0 |
-| 3 | Bronze layer: Spark Structured Streaming from Kafka into Iceberg, with a dead-letter table | v0.2.0 |
-| 4 | Silver layer: deduplication with `MERGE INTO`, cleaning rules, data quality checks | v0.3.0 |
-| 5 | Gold layer and Iceberg showcase: aggregates, time travel, maintenance | v0.4.0 |
-| 6 | Orchestration with Airflow: silver, gold and maintenance DAGs | v0.5.0 |
+| 0 | Foundations: pinned images, healthchecks, Compose profiles, Makefile, CI, ADRs | done |
+| 1 | Flight events published to Kafka, with a versioned schema and fault injection | done |
+| 2 | Lakehouse storage: S3-compatible store, Iceberg REST catalog, Spark cluster | done |
+| 3 | Bronze layer: Spark Structured Streaming from Kafka into Iceberg, with a dead-letter table | done |
+| 4 | Silver layer: deduplication with `MERGE INTO`, cleaning rules, data quality checks | done |
+| 5 | Gold layer and Iceberg showcase: aggregates, time travel, maintenance | done |
+| 6 | Orchestration with Airflow: silver, gold and maintenance DAGs | done |
 | 7 | Serving and observability (Trino, dashboards). Optional | - |
 
 ## Design constraints
