@@ -98,6 +98,9 @@ stage_maintenance() {
 
 stage_orchestration() {
   step "Orchestration: Airflow runs the same jobs, and re-running them changes nothing"
+  # Start with every DAG paused so the scheduler cannot run a job while we test it by hand: two
+  # concurrent MERGE commits on the same Iceberg table conflict.
+  export AIRFLOW_DAGS_PAUSED=true
   "${COMPOSE[@]}" up -d --build postgres airflow
   scripts/wait_for_http.sh http://localhost:8088/health 300
 
@@ -110,12 +113,27 @@ stage_orchestration() {
 
   local before after
   before="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
+  [ -n "$before" ] || fail "could not read the table counts"
   "${airflow[@]}" airflow tasks test silver_pipeline silver_flights 2026-01-01
   "${airflow[@]}" airflow tasks test gold_pipeline gold_flights 2026-01-01
   "${airflow[@]}" airflow tasks test maintenance_pipeline maintain_tables 2026-01-01
   after="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
-  [ -n "$before" ] || fail "could not read the table counts"
   [ "$before" = "$after" ] || fail "the DAG tasks changed the data: before=[$before] after=[$after]"
+
+  step "Orchestration: the scheduler runs silver, and silver's dataset triggers gold"
+  "${airflow[@]}" airflow dags unpause silver_pipeline
+  "${airflow[@]}" airflow dags unpause gold_pipeline
+  "${airflow[@]}" airflow dags trigger silver_pipeline
+
+  local runs deadline=$((SECONDS + 420))
+  while true; do
+    runs="$("${airflow[@]}" airflow dags list-runs -d gold_pipeline -o plain)"
+    echo "$runs" | grep -Eq "dataset_triggered.*failed" && fail "the dataset-triggered gold run failed"
+    echo "$runs" | grep -Eq "dataset_triggered.*success" && break
+    [ "$SECONDS" -lt "$deadline" ] || fail "gold was not triggered by the silver dataset in time"
+    sleep 15
+  done
+  echo "gold ran because silver published its dataset"
 }
 
 if [ "${DEMO_CLEAN:-1}" = "1" ]; then

@@ -30,8 +30,10 @@ jobs:
           print(f"::error title={title}::{text}")
           PY
           }
-          tail -n 60 demo.log > demo.tail
-          annotate "demo.sh (last 60 lines)" demo.tail
+          tail -n 40 demo.log > demo.tail
+          annotate "demo.sh (last 40 lines)" demo.tail
+          grep -E "Exception|Caused by|ERROR|Error:" demo.log | tail -n 25 > errors.tail || true
+          annotate "errors found in the demo log" errors.tail
           docker compose --profile all logs --no-color --tail 25 > services.log 2>&1 || true
           tail -n 90 services.log > services.tail
           annotate "service logs (last lines)" services.tail
