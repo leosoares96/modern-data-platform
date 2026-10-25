@@ -15,6 +15,18 @@ x-s3-credentials: &s3-credentials
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
   AWS_REGION: us-east-1
 
+x-spark-build: &spark-build
+  context: .
+  dockerfile: docker/spark/Dockerfile
+
+x-spark-env: &spark-env
+  <<: *s3-credentials
+  S3_ENDPOINT: http://minio:9000
+  ICEBERG_REST_URI: http://iceberg-rest:8181
+  WAREHOUSE: s3://${WAREHOUSE_BUCKET:-warehouse}/
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  SPARK_MASTER_URL: spark://spark-master:7077
+
 services:
   kafka:
     image: apache/kafka:3.9.0
@@ -127,5 +139,66 @@ services:
     ports:
       - "8181:8181"
 
+  spark-master:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-master
+    profiles: *lake-profiles
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "8080:8080" # master UI
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  spark-worker:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-worker
+    profiles: *lake-profiles
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - "8081"
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-3g}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+    ports:
+      - "8081:8081" # worker UI
+
+  # Long-lived container used to submit jobs: `docker compose exec spark-client bash scripts/submit.sh ...`
+  spark-client:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-client
+    profiles: *lake-profiles
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    environment: *spark-env
+    volumes:
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+      - spark-checkpoints:/opt/platform/checkpoints
+
 volumes:
   minio-data:
+  spark-checkpoints:
