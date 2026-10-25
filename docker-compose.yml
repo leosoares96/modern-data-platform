@@ -1,16 +1,296 @@
-services:
+name: modern-data-platform
 
+# Profiles (see docs/decisions/0002-compose-profiles.md):
+#   ingest         Kafka + event producer
+#   lake           object store, Iceberg REST catalog and Spark cluster
+#   stream         everything needed to run the bronze streaming job
+#   orchestration  lake + Airflow
+#   all            everything
+x-kafka-profiles: &kafka-profiles [ingest, stream, all]
+
+x-lake-profiles: &lake-profiles [lake, stream, orchestration, all]
+
+x-s3-credentials: &s3-credentials
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  AWS_REGION: us-east-1
+
+x-spark-build: &spark-build
+  context: .
+  dockerfile: docker/spark/Dockerfile
+
+x-spark-env: &spark-env
+  <<: *s3-credentials
+  S3_ENDPOINT: http://minio:9000
+  ICEBERG_REST_URI: http://iceberg-rest:8181
+  WAREHOUSE: s3://${WAREHOUSE_BUCKET:-warehouse}/
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  SPARK_MASTER_URL: spark://spark-master:7077
+
+services:
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:3.9.0
     container_name: kafka
+    profiles: *kafka-profiles
     ports:
-      - "9092:9092"
+      - "9092:9092" # host access (EXTERNAL listener)
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: kafka-init
+    profiles: *kafka-profiles
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: flights.raw
+    volumes:
+      - ./scripts/create_topics.sh:/opt/platform/create_topics.sh:ro
+    entrypoint: ["/bin/sh", "/opt/platform/create_topics.sh"]
+    restart: "no"
+
+  producer:
+    build: ./producer/adsb
+    container_name: producer
+    profiles: *kafka-profiles
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: flights.raw
+      EVENTS_FLEET_SIZE: ${EVENTS_FLEET_SIZE:-20}
+      EVENTS_TICK_SECONDS: ${EVENTS_TICK_SECONDS:-1.0}
+      PRODUCER_MAX_EVENTS: ${PRODUCER_MAX_EVENTS:-0}
+      PRODUCER_SEED: ${PRODUCER_SEED:-}
+      DUPLICATE_RATE: ${DUPLICATE_RATE:-0.02}
+      LATE_RATE: ${LATE_RATE:-0.05}
+      MALFORMED_RATE: ${MALFORMED_RATE:-0.02}
+    restart: on-failure
+
+  minio:
+    # Community fork of MinIO. Upstream stopped publishing container images; see ADR 0005.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: minio
+    profiles: *lake-profiles
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: amazon/aws-cli:2.17.0
+    container_name: minio-init
+    profiles: *lake-profiles
+    depends_on:
+      - minio
+    environment:
+      <<: *s3-credentials
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-warehouse}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws --endpoint-url http://minio:9000 s3 mb "s3://$${WAREHOUSE_BUCKET}" 2>/dev/null           || aws --endpoint-url http://minio:9000 s3 ls "s3://$${WAREHOUSE_BUCKET}" > /dev/null 2>&1; do
+          echo "waiting for the object store..."; sleep 2
+        done
+        echo "bucket ready: $${WAREHOUSE_BUCKET}"
+    restart: "no"
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: iceberg-rest
+    profiles: *lake-profiles
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *s3-credentials
+      CATALOG_WAREHOUSE: s3://${WAREHOUSE_BUCKET:-warehouse}/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "8181:8181"
+
+  spark-master:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-master
+    profiles: *lake-profiles
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "8080:8080" # master UI
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  spark-worker:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-worker
+    profiles: *lake-profiles
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - "8081"
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-3g}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+    ports:
+      - "8081:8081" # worker UI
+
+  # Long-lived container used to submit jobs: `docker compose exec spark-client bash scripts/submit.sh ...`
+  spark-client:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: spark-client
+    profiles: *lake-profiles
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    environment: *spark-env
+    volumes:
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+      - spark-checkpoints:/opt/platform/checkpoints
+
+  # Continuous bronze ingestion: Kafka -> Iceberg. Runs until stopped and restarts if the catalog
+  # or the cluster were not ready yet.
+  bronze-stream:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: bronze-stream
+    profiles: [stream, all]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+      spark-master:
+        condition: service_healthy
+    command:
+      - bash
+      - /opt/platform/scripts/submit.sh
+      - /opt/platform/spark/streaming/adsb_stream.py
+    environment:
+      <<: *spark-env
+      KAFKA_TOPIC: flights.raw
+      # Keep the long-running stream small so batch jobs still get resources on the same worker.
+      SPARK_CORES_MAX: "1"
+      SPARK_EXECUTOR_MEMORY: 512m
+      SPARK_DRIVER_MEMORY: 768m
+    volumes:
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+      - spark-checkpoints:/opt/platform/checkpoints
+    restart: on-failure
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    profiles: [orchestration, all]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    image: mdp-airflow:local
+    container_name: airflow
+    profiles: [orchestration, all]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+    command: ["bash", "/opt/airflow/start.sh"]
+    environment:
+      <<: *spark-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
+      SPARK_CORES_MAX: "2"
+      SPARK_EXECUTOR_MEMORY: 1g
+      SPARK_DRIVER_MEMORY: 768m
+    ports:
+      - "8088:8080" # Airflow UI (admin / admin)
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./docker/airflow/start.sh:/opt/airflow/start.sh:ro
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  minio-data:
+  spark-checkpoints:
+  postgres-data:
