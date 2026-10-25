@@ -1,4 +1,7 @@
-"""Write and read an Iceberg table end to end. Proves Spark, the catalog and the object store agree."""
+"""Write and read an Iceberg table end to end.
+
+Proves that Spark, the catalog and the object store agree with each other.
+"""
 
 from lakehouse.ddl import ensure_lakehouse
 from lakehouse.session import get_spark
