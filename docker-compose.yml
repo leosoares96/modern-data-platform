@@ -35,3 +35,37 @@ services:
       timeout: 10s
       retries: 12
       start_period: 20s
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: kafka-init
+    profiles: *kafka-profiles
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: flights.raw
+    volumes:
+      - ./scripts/create_topics.sh:/opt/platform/create_topics.sh:ro
+    entrypoint: ["/bin/sh", "/opt/platform/create_topics.sh"]
+    restart: "no"
+
+  producer:
+    build: ./producer/adsb
+    container_name: producer
+    profiles: *kafka-profiles
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: flights.raw
+      EVENTS_FLEET_SIZE: ${EVENTS_FLEET_SIZE:-20}
+      EVENTS_TICK_SECONDS: ${EVENTS_TICK_SECONDS:-1.0}
+      PRODUCER_MAX_EVENTS: ${PRODUCER_MAX_EVENTS:-0}
+      PRODUCER_SEED: ${PRODUCER_SEED:-}
+      DUPLICATE_RATE: ${DUPLICATE_RATE:-0.02}
+      LATE_RATE: ${LATE_RATE:-0.05}
+      MALFORMED_RATE: ${MALFORMED_RATE:-0.02}
+    restart: on-failure
