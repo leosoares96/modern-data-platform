@@ -232,6 +232,65 @@ services:
       - spark-checkpoints:/opt/platform/checkpoints
     restart: on-failure
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    profiles: [orchestration, all]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    image: mdp-airflow:local
+    container_name: airflow
+    profiles: [orchestration, all]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+    command: ["bash", "/opt/airflow/start.sh"]
+    environment:
+      <<: *spark-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
+      SPARK_CORES_MAX: "2"
+      SPARK_EXECUTOR_MEMORY: 1g
+      SPARK_DRIVER_MEMORY: 768m
+    ports:
+      - "8088:8080" # Airflow UI (admin / admin)
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./docker/airflow/start.sh:/opt/airflow/start.sh:ro
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
 volumes:
   minio-data:
   spark-checkpoints:
+  postgres-data:
