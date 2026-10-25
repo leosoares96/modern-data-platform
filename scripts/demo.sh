@@ -12,6 +12,10 @@ EVENTS="${DEMO_EVENTS:-400}"
 export PRODUCER_MAX_EVENTS="$EVENTS"
 export EVENTS_TICK_SECONDS=0
 export PRODUCER_SEED="${PRODUCER_SEED:-42}"
+# Dirty data on purpose, so every defensive path in the pipeline is exercised.
+export DUPLICATE_RATE="${DUPLICATE_RATE:-0.05}"
+export LATE_RATE="${LATE_RATE:-0.10}"
+export MALFORMED_RATE="${MALFORMED_RATE:-0.05}"
 
 COMPOSE=(docker compose --profile all)
 
@@ -52,7 +56,19 @@ stage_lake() {
   submit /opt/platform/spark/admin/smoke_test.py
 }
 
+stage_bronze() {
+  step "Bronze: draining Kafka into Iceberg with Spark Structured Streaming"
+  submit /opt/platform/spark/streaming/adsb_stream.py --once
+  submit /opt/platform/spark/admin/verify.py bronze --events "$EVENTS"
+}
+
+if [ "${DEMO_CLEAN:-1}" = "1" ]; then
+  step "Starting from a clean state (set DEMO_CLEAN=0 to keep existing data)"
+  "${COMPOSE[@]}" down -v --remove-orphans
+fi
+
 stage_ingest
 stage_lake
+stage_bronze
 
 step "Demo finished"
