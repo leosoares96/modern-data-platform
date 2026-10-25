@@ -111,5 +111,21 @@ services:
         echo "bucket ready: $${WAREHOUSE_BUCKET}"
     restart: "no"
 
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: iceberg-rest
+    profiles: *lake-profiles
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *s3-credentials
+      CATALOG_WAREHOUSE: s3://${WAREHOUSE_BUCKET:-warehouse}/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "8181:8181"
+
 volumes:
   minio-data:
