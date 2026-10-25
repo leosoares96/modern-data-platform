@@ -71,7 +71,7 @@ docker compose --profile all exec -T spark-client bash /opt/platform/scripts/sub
 | Run silver by hand | `docker compose --profile all exec -T spark-client bash /opt/platform/scripts/submit.sh /opt/platform/spark/batch/silver_job.py` |
 | Rebuild silver from all of bronze | the same, with `--full-refresh` |
 | Drain Kafka once and stop | `.../spark/streaming/adsb_stream.py --once` |
-| Compact and expire snapshots | `.../spark/batch/maintenance_job.py` |
+| Compact small files and expire old snapshots | `.../spark/batch/maintenance_job.py` |
 
 Silver and gold are idempotent, so running them again is always safe.
 

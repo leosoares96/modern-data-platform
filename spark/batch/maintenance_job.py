@@ -1,13 +1,15 @@
-"""Iceberg table maintenance: compaction, snapshot expiry and orphan file removal.
+"""Iceberg table maintenance: compaction and snapshot expiry.
 
 Streaming and frequent merges create many small files and a snapshot per commit. This job keeps the
 tables healthy:
 
   rewrite_data_files   merge small files into larger ones (compaction)
   expire_snapshots     forget snapshots older than the cutoff, always keeping the latest few
-  remove_orphan_files  delete files no snapshot references (left behind by failed writes)
 
 Expiring snapshots limits time travel to what is kept, so --older-than-hours is a retention policy.
+
+remove_orphan_files is deliberately not run. It lists files through the Hadoop FileSystem API and
+this image has no S3A connector (see docs/decisions/0008-no-s3a-connector.md).
 """
 
 from __future__ import annotations
@@ -59,12 +61,6 @@ def main() -> None:
             f"older_than => {cutoff_literal}, retain_last => {args.retain_last})"
         ).collect()
         show("expire", table, expired)
-
-        orphans = spark.sql(
-            f"CALL lake.system.remove_orphan_files("
-            f"table => '{table}', older_than => {cutoff_literal})"
-        ).collect()
-        print(f"maintenance orphans {table}: removed={len(orphans)}", flush=True)
 
     print("MAINTENANCE OK", flush=True)
     spark.stop()

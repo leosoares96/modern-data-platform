@@ -86,7 +86,7 @@ stage_iceberg() {
 }
 
 stage_maintenance() {
-  step "Maintenance: compaction, snapshot expiry and orphan files must not change the data"
+  step "Maintenance: compaction and snapshot expiry must not change the data"
   local before after
   before="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
   submit /opt/platform/spark/batch/maintenance_job.py

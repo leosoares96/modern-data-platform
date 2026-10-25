@@ -12,6 +12,7 @@ append-only. When one is replaced, a new ADR supersedes it instead of the old on
 | [0005](0005-s3-compatible-object-store.md) | S3-compatible object store: a MinIO fork | Accepted |
 | [0006](0006-at-least-once-bronze-idempotent-silver.md) | At-least-once bronze, idempotent silver | Accepted |
 | [0007](0007-merge-on-read.md) | Merge-on-read for silver | Accepted |
+| [0008](0008-no-s3a-connector.md) | No S3A connector: local checkpoints, no orphan file removal | Accepted |
 
 ## Template
 
