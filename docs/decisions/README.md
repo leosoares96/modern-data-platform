@@ -10,6 +10,8 @@ append-only. When one is replaced, a new ADR supersedes it instead of the old on
 | [0003](0003-apache-iceberg-table-format.md) | Apache Iceberg as the table format | Accepted |
 | [0004](0004-iceberg-rest-catalog.md) | Iceberg REST catalog | Accepted |
 | [0005](0005-s3-compatible-object-store.md) | S3-compatible object store: a MinIO fork | Accepted |
+| [0006](0006-at-least-once-bronze-idempotent-silver.md) | At-least-once bronze, idempotent silver | Accepted |
+| [0007](0007-merge-on-read.md) | Merge-on-read for silver | Accepted |
 
 ## Template
 
