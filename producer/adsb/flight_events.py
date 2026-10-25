@@ -11,7 +11,8 @@ import random
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 SCHEMA_VERSION = 1
 
@@ -37,6 +38,26 @@ SCHEMA: dict[str, type] = {
     "on_ground": bool,
     "event_ts": str,
 }
+
+
+MALFORMED_KINDS = ("not_json", "missing_field", "wrong_type", "out_of_range")
+
+
+@dataclass(frozen=True)
+class FaultConfig:
+    """Probabilities (0 to 1) applied independently to every event."""
+
+    duplicate_rate: float = 0.0
+    late_rate: float = 0.0
+    malformed_rate: float = 0.0
+    max_lateness_s: int = 1800
+
+
+class Payload(NamedTuple):
+    """What goes on the wire: an optional Kafka key and the message value."""
+
+    key: str | None
+    value: str
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -101,7 +122,9 @@ class FlightEventGenerator:
         seed: int | None = None,
         tick_seconds: float = 1.0,
         clock: Callable[[], datetime] | None = None,
+        faults: FaultConfig | None = None,
     ) -> None:
+        self._faults = faults or FaultConfig()
         self._rng = random.Random(seed)
         self._tick_seconds = tick_seconds
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -151,3 +174,47 @@ class FlightEventGenerator:
             plane.step(self._rng, self._tick_seconds)
             events.append(self._to_event(plane, now))
         return events
+
+    def _make_late(self, event: dict) -> dict:
+        """Report an old observation: same event, event_ts shifted into the past."""
+        shift = timedelta(seconds=self._rng.uniform(300.0, max(self._faults.max_lateness_s, 301)))
+        observed = datetime.fromisoformat(event["event_ts"].replace("Z", "+00:00")) - shift
+        late = dict(event)
+        late["event_ts"] = observed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        return late
+
+    def _corrupt(self, event: dict) -> Payload:
+        """Break an event in one of four ways.
+
+        not_json, missing_field and wrong_type fail schema parsing and end up in the bronze
+        dead-letter table. out_of_range is valid JSON that breaks a business rule, so it is
+        parsed into bronze and quarantined later in silver.
+        """
+        kind = self._rng.choice(MALFORMED_KINDS)
+        key = event["icao24"]
+        if kind == "not_json":
+            return Payload(key, "{not-json:" + event["event_id"][:8])
+        broken = dict(event)
+        if kind == "missing_field":
+            del broken["icao24"]
+        elif kind == "wrong_type":
+            broken["baro_altitude_m"] = "high"
+        else:
+            broken["latitude"] = 123.4
+        return Payload(key, encode(broken))
+
+    def tick_payloads(self) -> list[Payload]:
+        """Like tick(), but serialised and with the configured faults applied."""
+        faults = self._faults
+        payloads: list[Payload] = []
+        for event in self.tick():
+            if self._rng.random() < faults.late_rate:
+                event = self._make_late(event)
+            if self._rng.random() < faults.malformed_rate:
+                payload = self._corrupt(event)
+            else:
+                payload = Payload(event["icao24"], encode(event))
+            payloads.append(payload)
+            if self._rng.random() < faults.duplicate_rate:
+                payloads.append(payload)
+        return payloads
