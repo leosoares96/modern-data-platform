@@ -8,6 +8,13 @@ name: modern-data-platform
 #   all            everything
 x-kafka-profiles: &kafka-profiles [ingest, stream, all]
 
+x-lake-profiles: &lake-profiles [lake, stream, orchestration, all]
+
+x-s3-credentials: &s3-credentials
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  AWS_REGION: us-east-1
+
 services:
   kafka:
     image: apache/kafka:3.9.0
@@ -69,3 +76,40 @@ services:
       LATE_RATE: ${LATE_RATE:-0.05}
       MALFORMED_RATE: ${MALFORMED_RATE:-0.02}
     restart: on-failure
+
+  minio:
+    # Community fork of MinIO. Upstream stopped publishing container images; see ADR 0005.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: minio
+    profiles: *lake-profiles
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: amazon/aws-cli:2.17.0
+    container_name: minio-init
+    profiles: *lake-profiles
+    depends_on:
+      - minio
+    environment:
+      <<: *s3-credentials
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-warehouse}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws --endpoint-url http://minio:9000 s3 mb "s3://$${WAREHOUSE_BUCKET}" 2>/dev/null           || aws --endpoint-url http://minio:9000 s3 ls "s3://$${WAREHOUSE_BUCKET}" > /dev/null 2>&1; do
+          echo "waiting for the object store..."; sleep 2
+        done
+        echo "bucket ready: $${WAREHOUSE_BUCKET}"
+    restart: "no"
+
+volumes:
+  minio-data:
