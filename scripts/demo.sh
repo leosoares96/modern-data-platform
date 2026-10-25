@@ -73,6 +73,29 @@ stage_silver() {
   echo "$second" | grep -Eq "inserted=0 |nothing new in bronze"     || fail "a second silver run inserted rows"
 }
 
+stage_gold() {
+  step "Gold: hourly aggregates and an activity grid, recomputed only for changed hours"
+  submit /opt/platform/spark/batch/gold_job.py
+  submit /opt/platform/spark/batch/gold_job.py   # again: must not double count
+  submit /opt/platform/spark/admin/verify.py gold --events "$EVENTS"
+}
+
+stage_iceberg() {
+  step "Iceberg showcase: time travel, rollback, schema and partition evolution"
+  submit /opt/platform/spark/demo/time_travel.py
+}
+
+stage_maintenance() {
+  step "Maintenance: compaction, snapshot expiry and orphan files must not change the data"
+  local before after
+  before="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
+  submit /opt/platform/spark/batch/maintenance_job.py
+  after="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
+  echo "$before"
+  [ -n "$before" ] || fail "could not read the table counts"
+  [ "$before" = "$after" ] || fail "maintenance changed the data: before=[$before] after=[$after]"
+}
+
 if [ "${DEMO_CLEAN:-1}" = "1" ]; then
   step "Starting from a clean state (set DEMO_CLEAN=0 to keep existing data)"
   "${COMPOSE[@]}" down -v --remove-orphans
@@ -82,5 +105,8 @@ stage_ingest
 stage_lake
 stage_bronze
 stage_silver
+stage_gold
+stage_iceberg
+stage_maintenance
 
 step "Demo finished"

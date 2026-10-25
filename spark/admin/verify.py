@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from pyspark.sql import functions as F
+
 from lakehouse.session import get_spark
 
 
@@ -82,7 +84,54 @@ def verify_silver(spark, events: int) -> None:
     check(failed == 0, "no error-severity quality check failed")
 
 
-STAGES = {"bronze": verify_bronze, "silver": verify_silver}
+def verify_gold(spark, events: int) -> None:
+    silver = count(spark, "lake.silver.flights")
+    hourly = spark.table("lake.gold.flights_hourly")
+    grid = spark.table("lake.gold.activity_grid")
+    hourly_observations = hourly.agg(F.sum("observations")).first()[0]
+    grid_observations = grid.agg(F.sum("observations")).first()[0]
+    print(
+        f"silver={silver} gold hourly rows={hourly.count()} observations={hourly_observations} "
+        f"| grid rows={grid.count()} observations={grid_observations}"
+    )
+
+    check(hourly.count() > 0, "gold has hourly aggregates")
+    check(hourly_observations == silver, "hourly observations add up to the silver rows")
+    check(grid_observations == silver, "grid observations add up to the silver rows")
+    check(
+        hourly.filter("flights > observations").count() == 0, "no hour has more flights than rows"
+    )
+    check(
+        hourly.filter("pct_on_ground < 0 OR pct_on_ground > 100").count() == 0,
+        "percentage of aircraft on the ground stays within 0 to 100",
+    )
+    checks = spark.table("lake.quality.check_results").filter("job = 'gold_flights'")
+    check(checks.count() > 0, "gold quality results were persisted")
+    check(checks.filter("NOT passed AND severity = 'error'").count() == 0, "gold checks passed")
+
+
+DATA_TABLES = [
+    "lake.bronze.flights_raw",
+    "lake.bronze.flights_dead_letter",
+    "lake.silver.flights",
+    "lake.silver.flights_quarantine",
+    "lake.gold.flights_hourly",
+    "lake.gold.activity_grid",
+]
+
+
+def print_counts(spark, events: int) -> None:
+    """One `count <table>=<rows>` line per table, so the demo can compare two runs."""
+    for table in DATA_TABLES:
+        print(f"count {table}={count(spark, table)}", flush=True)
+
+
+STAGES = {
+    "bronze": verify_bronze,
+    "silver": verify_silver,
+    "gold": verify_gold,
+    "counts": print_counts,
+}
 
 
 def main() -> None:
