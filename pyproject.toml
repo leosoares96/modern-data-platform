@@ -4,6 +4,11 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# UP038 is deprecated upstream: isinstance(x, (int, float)) is just as clear and faster.
+ignore = ["UP038"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["flight_events", "lakehouse"]
 
 [tool.pytest.ini_options]
 pythonpath = ["producer/adsb", "spark", "airflow/dags"]
