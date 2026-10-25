@@ -62,6 +62,17 @@ stage_bronze() {
   submit /opt/platform/spark/admin/verify.py bronze --events "$EVENTS"
 }
 
+stage_silver() {
+  step "Silver: deduplicate with MERGE INTO, apply business rules, run quality checks"
+  submit /opt/platform/spark/batch/silver_job.py
+  submit /opt/platform/spark/admin/verify.py silver --events "$EVENTS"
+
+  step "Silver is idempotent: running it again must not insert anything"
+  local second
+  second="$(submit /opt/platform/spark/batch/silver_job.py | tee /dev/stderr)"
+  echo "$second" | grep -Eq "inserted=0 |nothing new in bronze"     || fail "a second silver run inserted rows"
+}
+
 if [ "${DEMO_CLEAN:-1}" = "1" ]; then
   step "Starting from a clean state (set DEMO_CLEAN=0 to keep existing data)"
   "${COMPOSE[@]}" down -v --remove-orphans
@@ -70,5 +81,6 @@ fi
 stage_ingest
 stage_lake
 stage_bronze
+stage_silver
 
 step "Demo finished"

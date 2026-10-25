@@ -51,7 +51,38 @@ def verify_bronze(spark, events: int) -> None:
     check(undeclared == 0, "bronze rows never miss event_id or icao24")
 
 
-STAGES = {"bronze": verify_bronze}
+def verify_silver(spark, events: int) -> None:
+    bronze_rows = count(spark, "lake.bronze.flights_raw")
+    bronze_ids = spark.table("lake.bronze.flights_raw").select("event_id").distinct().count()
+    silver = count(spark, "lake.silver.flights")
+    silver_ids = spark.table("lake.silver.flights").select("event_id").distinct().count()
+    quarantine = count(spark, "lake.silver.flights_quarantine")
+    print(
+        f"bronze rows={bronze_rows} distinct ids={bronze_ids} | "
+        f"silver={silver} quarantine={quarantine}"
+    )
+
+    check(bronze_rows > bronze_ids, "the producer injected duplicates into bronze")
+    check(silver == silver_ids, "silver holds each event_id exactly once")
+    check(
+        silver + quarantine == bronze_ids,
+        f"every distinct bronze event is in silver or quarantine ({silver} + {quarantine})",
+    )
+    check(quarantine > 0, "events that break a business rule were quarantined")
+
+    late = spark.table("lake.silver.flights").filter("is_late").count()
+    check(late > 0, f"late arrivals are flagged in silver ({late})")
+
+    reasons = spark.table("lake.silver.flights_quarantine").select("reasons").distinct().collect()
+    print(f"quarantine reasons: {sorted(row['reasons'] for row in reasons)}")
+
+    checks = spark.table("lake.quality.check_results").filter("job = 'silver_flights'")
+    check(checks.count() > 0, "quality results were persisted")
+    failed = checks.filter("NOT passed AND severity = 'error'").count()
+    check(failed == 0, "no error-severity quality check failed")
+
+
+STAGES = {"bronze": verify_bronze, "silver": verify_silver}
 
 
 def main() -> None:
