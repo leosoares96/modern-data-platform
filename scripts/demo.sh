@@ -96,6 +96,28 @@ stage_maintenance() {
   [ "$before" = "$after" ] || fail "maintenance changed the data: before=[$before] after=[$after]"
 }
 
+stage_orchestration() {
+  step "Orchestration: Airflow runs the same jobs, and re-running them changes nothing"
+  "${COMPOSE[@]}" up -d --build postgres airflow
+  scripts/wait_for_http.sh http://localhost:8088/health 300
+
+  local airflow=("${COMPOSE[@]}" exec -T airflow)
+  local dags
+  dags="$("${airflow[@]}" airflow dags list -o plain)"
+  for dag in silver_pipeline gold_pipeline maintenance_pipeline; do
+    echo "$dags" | grep -q "$dag" || fail "Airflow did not load the DAG $dag"
+  done
+
+  local before after
+  before="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
+  "${airflow[@]}" airflow tasks test silver_pipeline silver_flights 2026-01-01
+  "${airflow[@]}" airflow tasks test gold_pipeline gold_flights 2026-01-01
+  "${airflow[@]}" airflow tasks test maintenance_pipeline maintain_tables 2026-01-01
+  after="$(submit /opt/platform/spark/admin/verify.py counts | grep '^count ' || true)"
+  [ -n "$before" ] || fail "could not read the table counts"
+  [ "$before" = "$after" ] || fail "the DAG tasks changed the data: before=[$before] after=[$after]"
+}
+
 if [ "${DEMO_CLEAN:-1}" = "1" ]; then
   step "Starting from a clean state (set DEMO_CLEAN=0 to keep existing data)"
   "${COMPOSE[@]}" down -v --remove-orphans
@@ -108,5 +130,6 @@ stage_silver
 stage_gold
 stage_iceberg
 stage_maintenance
+stage_orchestration
 
 step "Demo finished"
