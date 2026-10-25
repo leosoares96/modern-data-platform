@@ -199,6 +199,39 @@ services:
       - ./scripts:/opt/platform/scripts:ro
       - spark-checkpoints:/opt/platform/checkpoints
 
+  # Continuous bronze ingestion: Kafka -> Iceberg. Runs until stopped and restarts if the catalog
+  # or the cluster were not ready yet.
+  bronze-stream:
+    build: *spark-build
+    image: mdp-spark:local
+    container_name: bronze-stream
+    profiles: [stream, all]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+      spark-master:
+        condition: service_healthy
+    command:
+      - bash
+      - /opt/platform/scripts/submit.sh
+      - /opt/platform/spark/streaming/adsb_stream.py
+    environment:
+      <<: *spark-env
+      KAFKA_TOPIC: flights.raw
+      # Keep the long-running stream small so batch jobs still get resources on the same worker.
+      SPARK_CORES_MAX: "1"
+      SPARK_EXECUTOR_MEMORY: 512m
+      SPARK_DRIVER_MEMORY: 768m
+    volumes:
+      - ./spark:/opt/platform/spark:ro
+      - ./scripts:/opt/platform/scripts:ro
+      - spark-checkpoints:/opt/platform/checkpoints
+    restart: on-failure
+
 volumes:
   minio-data:
   spark-checkpoints:
